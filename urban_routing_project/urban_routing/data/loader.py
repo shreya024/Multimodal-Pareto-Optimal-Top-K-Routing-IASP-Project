@@ -115,10 +115,10 @@ class BMTCLoader:
 
     def _load_bmtc(self, csv_files: List[Path]):
         print(f"[loader] Found CSVs: {[f.name for f in csv_files]}")
-
-        # Try GTFS (needs at least stops.csv + routes.csv)
         by_name = {f.name.lower(): f for f in csv_files}
-        if "stops.csv" in by_name:
+
+        # Standard GTFS takes priority — detected by presence of stops.csv + trips.csv
+        if "stops.csv" in by_name and "trips.csv" in by_name:
             try:
                 self._load_gtfs(by_name)
                 if self.stops and self.routes:
@@ -128,7 +128,7 @@ class BMTCLoader:
                 print(f"[loader] GTFS attempt failed: {e}")
                 self.stops = {}; self.routes = {}
 
-        # Try every CSV as a route-stop table
+        # Fallback: try each CSV as a route-stop table
         for fpath in csv_files:
             try:
                 df = _norm_cols(pd.read_csv(fpath, low_memory=False))
@@ -142,14 +142,13 @@ class BMTCLoader:
                 if self.stops and self.routes:
                     layout = "B (stop-sequence)" if seq_col else "A (from/to)"
                     print(f"[loader] Layout {layout} ({fpath.name}): "
-                          f"{len(self.stops)} stops, {len(self.routes)} routes")
+                        f"{len(self.stops)} stops, {len(self.routes)} routes")
                     return
             except Exception as e:
                 print(f"[loader] Skipping {fpath.name}: {e}")
                 self.stops = {}; self.routes = {}
 
         raise RuntimeError("No CSV yielded a valid stops+routes dataset.")
-
     # ─── Layout A: From / To terminals ───────────────────────────────────────
 
     def _load_layout_a(self, df: pd.DataFrame):

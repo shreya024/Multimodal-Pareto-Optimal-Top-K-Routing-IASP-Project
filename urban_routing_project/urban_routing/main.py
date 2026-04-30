@@ -1,36 +1,41 @@
 """
-main.py — CLI entry point for Urban Multimodal Pareto-Optimal Routing.
+main.py — CLI entry point for Multimodal Pareto-Optimal Routing.
+Layers: BMTC bus (synthetic/real CSV) + Namma Metro (real GTFS) + walk.
 
 Usage
 -----
-  # Full pipeline on real BMTC data
+  # Synthetic bus + real Metro GTFS
   python main.py --origin "Majestic" --destination "Whitefield" --top-k 5
 
-  # On synthetic data (no Kaggle download required)
-  python main.py --synthetic --origin 0 --destination 99 --top-k 5
+  # Force synthetic bus data
+  python main.py --synthetic --origin "Majestic" --destination "Whitefield"
 
-  # Run benchmark on multiple random OD pairs
-  python main.py --synthetic --benchmark --n-pairs 10 --top-k 5
+  # Benchmark
+  python main.py --benchmark --n-pairs 8 --top-k 5
+
+  # List all metro stations
+  python main.py --list-metro
 
   # Skip plots
-  python main.py --synthetic --origin 0 --destination 50 --no-plots
+  python main.py --origin "Majestic" --destination "Indiranagar" --no-plots
 """
 from __future__ import annotations
 
 import argparse
 import random
 import sys
+import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).parent))
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-# ── Ensure project root on path ───────────────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).parent))
-
 import config as cfg
+from data.fuser import MultimodalFuser
 from data.loader import BMTCLoader
 from core.graph import MultimodalGraph
 from algorithms.pareto_dijkstra import ParetoDijkstra
@@ -40,74 +45,122 @@ from selection.diversity_selector import DiversitySelector
 from selection.cluster_selector import ClusterSelector
 from evaluation.benchmark import run_benchmark
 from evaluation.metrics import summarize_paths
-from visualization.plot import (
-    plot_pareto_front, plot_parallel_coordinates,
-    plot_method_comparison, plot_routes_on_map, plot_radar,
-)
 
 console = Console()
 
 
-# ── Argument parsing ──────────────────────────────────────────────────────────
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Urban Multimodal Pareto Routing")
-    p.add_argument("--origin",       type=str, default=None,
-                   help="Origin stop ID or name")
-    p.add_argument("--destination",  type=str, default=None,
-                   help="Destination stop ID or name")
-    p.add_argument("--top-k",        type=int, default=cfg.DEFAULT_TOP_K,
-                   help="Number of Top-K routes to select")
+    p = argparse.ArgumentParser(description="Multimodal Pareto Routing — BMTC + Namma Metro")
+    p.add_argument("--origin",       type=str, default=None)
+    p.add_argument("--destination",  type=str, default=None)
+    p.add_argument("--top-k",        type=int, default=cfg.DEFAULT_TOP_K)
     p.add_argument("--synthetic",    action="store_true",
-                   help="Force use of synthetic dataset")
-    p.add_argument("--benchmark",    action="store_true",
-                   help="Run benchmark over multiple OD pairs")
-    p.add_argument("--n-pairs",      type=int, default=5,
-                   help="Number of random OD pairs for benchmark")
-    p.add_argument("--no-plots",     action="store_true",
-                   help="Skip generating plots")
+                   help="Force synthetic bus data (Metro GTFS always used if present)")
+    p.add_argument("--benchmark",    action="store_true")
+    p.add_argument("--n-pairs",      type=int, default=6)
+    p.add_argument("--no-plots",     action="store_true")
+    p.add_argument("--list-metro",   action="store_true",
+                   help="Print all metro stations and exit")
+    p.add_argument("--use-osm",      action="store_true",
+                   help="Add OSM pedestrian walk layer (requires internet)")
     p.add_argument("--weights",      type=float, nargs=5,
                    default=list(cfg.DEFAULT_WEIGHTS),
-                   metavar=("W_TIME","W_COST","W_XFER","W_WALK","W_CO2"),
-                   help="Weighted-sum weights (must sum to 1)")
+                   metavar=("W_TIME","W_COST","W_XFER","W_WALK","W_CO2"))
     return p.parse_args()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def build_system(args) -> Tuple[MultimodalGraph, MultimodalFuser]:
+    fuser = MultimodalFuser(use_osm=args.use_osm)
+
+    if args.synthetic:
+        # Patch bus loader to use synthetic directly
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fuser.bus_loader = BMTCLoader()
+            fuser.bus_loader._generate_synthetic()
+            fuser.bus_loader._loaded = True
+        bus_stops  = fuser.bus_loader.get_stops()
+        bus_routes = fuser.bus_loader.get_routes()
+        fuser.all_stops.update(bus_stops)
+        fuser.all_routes.update(bus_routes)
+        print(f"[fuser] Bus   : {len(bus_stops):4d} stops (synthetic), "
+              f"{len(bus_routes):3d} routes")
+
+        # Still load real metro
+        from data.metro import MetroLoader
+        fuser.metro_loader = MetroLoader()
+        fuser.metro_loader.load()
+        fuser.all_stops.update(fuser.metro_loader.stops)
+        fuser.all_routes.update(fuser.metro_loader.routes)
+        fuser.extra_edges.extend(fuser.metro_loader.segment_edges)
+        fuser.extra_edges.extend(fuser.metro_loader.interchange_edges)
+        print(f"[fuser] Metro : {len(fuser.metro_loader.stops):4d} stations, "
+              f"{len(fuser.metro_loader.routes):3d} lines")
+
+        n = fuser._build_bus_metro_transfers(bus_stops, fuser.metro_loader.stops)
+        print(f"[fuser] Bus↔Metro transfer edges : {n}")
+    else:
+        fuser.load()
+
+    graph = MultimodalGraph()
+    graph.build(
+        stops          = fuser.all_stops,
+        routes         = fuser.all_routes,
+        extra_edges    = fuser.extra_edges,
+        transfer_edges = fuser.transfer_edges,
+    )
+    return graph, fuser
+
+
 def resolve_stop(graph: MultimodalGraph, query: str) -> Optional[str]:
-    """Find a stop_id by exact ID or by fuzzy name match."""
+    """Exact ID match first, then fuzzy name search."""
     if graph.has_node(query):
         return query
-    query_lower = query.lower()
-    for sid, stop in graph.stops.items():
-        if query_lower in stop.name.lower():
-            return sid
+    matches = graph.find_stop_by_name(query)
+    if matches:
+        # Prefer exact match
+        for sid in matches:
+            if graph.stops[sid].name.lower() == query.lower():
+                return sid
+        return matches[0]
     return None
 
 
-def random_od_pairs(stop_ids: List[str], n: int, seed: int = 0) -> List[Tuple[str, str]]:
+def random_connected_pairs(graph: MultimodalGraph, n: int, seed: int = 0) -> List[Tuple[str,str]]:
+    """Sample random OD pairs that have at least one path between them."""
+    import networkx as nx
     rng = random.Random(seed)
+    stop_ids = list(graph.stops.keys())
     pairs = []
-    while len(pairs) < n:
+    attempts = 0
+    while len(pairs) < n and attempts < n * 20:
         o, d = rng.sample(stop_ids, 2)
-        if o != d:
+        if nx.has_path(graph.G, o, d):
             pairs.append((o, d))
+        attempts += 1
     return pairs
 
 
-def print_route_table(paths, title: str = "Top-K Routes"):
+def print_route_table(paths, title: str = "Routes"):
+    if not paths:
+        console.print(f"  [dim]No routes found.[/dim]")
+        return
     table = Table(title=title, show_lines=True)
-    table.add_column("#",          width=3)
-    table.add_column("Time (min)", justify="right")
-    table.add_column("Cost (₹)",   justify="right")
-    table.add_column("Transfers",  justify="right")
-    table.add_column("Walk (m)",   justify="right")
-    table.add_column("CO₂ (g)",    justify="right")
-    table.add_column("Hops",       justify="right")
-
+    table.add_column("#",             width=3)
+    table.add_column("Time (min)",    justify="right")
+    table.add_column("Cost (₹)",      justify="right")
+    table.add_column("Transfers",     justify="right")
+    table.add_column("Walk (m)",      justify="right")
+    table.add_column("CO₂ (g)",       justify="right")
+    table.add_column("Hops",          justify="right")
+    table.add_column("Modes used")
     for i, path in enumerate(paths, 1):
         w = path.total_weight
+        modes = sorted({e.mode.value for e in path.edges if e.mode.value != "transfer"})
         table.add_row(
             str(i),
             f"{w.time_min:.1f}",
@@ -116,172 +169,187 @@ def print_route_table(paths, title: str = "Top-K Routes"):
             f"{w.walking_m:.0f}",
             f"{w.co2_g:.0f}",
             str(len(path.nodes) - 1),
+            " + ".join(modes),
         )
     console.print(table)
 
 
-# ── Main pipeline ─────────────────────────────────────────────────────────────
+def print_route_detail(path, graph: MultimodalGraph, label: str = ""):
+    """Print hop-by-hop itinerary for one path."""
+    if not path or not path.edges:
+        return
+    console.print(f"\n  [bold]{label} Itinerary:[/bold]")
+    current_mode = None
+    for edge in path.edges:
+        mode = edge.mode.value
+        src_name = graph.stop_name(edge.src)
+        dst_name = graph.stop_name(edge.dst)
+        if mode != current_mode:
+            mode_tag = {
+                "bus":      "[green]🚌 BUS[/green]",
+                "metro":    "[blue]🚇 METRO[/blue]",
+                "walk":     "[yellow]🚶 WALK[/yellow]",
+                "transfer": "[magenta]↔ TRANSFER[/magenta]",
+            }.get(mode, mode.upper())
+            console.print(f"     {mode_tag}")
+            current_mode = mode
+        console.print(
+            f"       {src_name} → {dst_name}  "
+            f"[dim]{edge.weight.time_min:.1f}min  ₹{edge.weight.cost_inr:.0f}[/dim]"
+        )
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
 
     console.print(Panel.fit(
-        "[bold blue]Urban Multimodal Pareto-Optimal Routing[/bold blue]\n"
-        "BMTC Bengaluru Bus Network — Multi-criteria Dijkstra",
+        "[bold blue]🚌 + 🚇  Urban Multimodal Pareto-Optimal Routing[/bold blue]\n"
+        "BMTC Bus  +  Namma Metro (BMRCL GTFS)  +  Walk",
         border_style="blue",
     ))
 
-    # ── Load data ──
-    loader = BMTCLoader()
-    if args.synthetic:
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            loader._generate_synthetic()
-            loader._loaded = True
-    else:
-        loader.load()
-
-    stops  = loader.get_stops()
-    routes = loader.get_routes()
-
-    # ── Build graph ──
-    console.print("\n[cyan]Building multi-layer graph...[/cyan]")
-    graph = MultimodalGraph()
-    graph.build(stops, routes)
-    console.print(f"  Nodes: {graph.node_count()}  |  Edges: {graph.edge_count()}")
-
-    stop_ids = list(stops.keys())
-
-    # ── Benchmark mode ──
-    if args.benchmark:
-        console.print(f"\n[cyan]Running benchmark on {args.n_pairs} random OD pairs...[/cyan]")
-        od_pairs = random_od_pairs(stop_ids, args.n_pairs)
-        results  = run_benchmark(graph, od_pairs, k=args.top_k, verbose=True)
-
-        if not args.no_plots:
-            plot_method_comparison(results)
-
-        # Aggregate summary
-        console.print("\n[bold]Aggregate method statistics:[/bold]")
-        methods = list(dict.fromkeys(r["method"] for r in results))
-        agg_table = Table(show_lines=True)
-        agg_table.add_column("Method")
-        agg_table.add_column("Avg Runtime (s)", justify="right")
-        agg_table.add_column("Avg Pareto Size", justify="right")
-        agg_table.add_column("Avg Diversity",   justify="right")
-        agg_table.add_column("Avg Hypervolume", justify="right")
-        import numpy as np
-        for method in methods:
-            rows = [r for r in results if r["method"] == method]
-            agg_table.add_row(
-                method,
-                f"{np.mean([r['runtime_s'] for r in rows]):.4f}",
-                f"{np.mean([r['pareto_size'] for r in rows]):.1f}",
-                f"{np.mean([r.get('diversity_score', 0) for r in rows]):.3f}",
-                f"{np.mean([r.get('hypervolume', 0) for r in rows]):.2e}",
-            )
-        console.print(agg_table)
+    # ── List metro stations ──
+    if args.list_metro:
+        from data.metro import MetroLoader
+        m = MetroLoader().load()
+        table = Table(title="Namma Metro Stations", show_lines=True)
+        table.add_column("ID"); table.add_column("Name"); table.add_column("Line")
+        purple_ids = {s.stop_id for s in m.routes.get("1", type("R",[],{"stops":[]})()).stops} \
+                     | {s.stop_id for s in m.routes.get("2", type("R",[],{"stops":[]})()).stops}
+        for sid, stop in m.stops.items():
+            line = "Purple" if sid in purple_ids else "Green"
+            table.add_row(sid, stop.name, line)
+        console.print(table)
         return
 
-    # ── Single OD query ──
-    origin_query = args.origin or stop_ids[0]
-    dest_query   = args.destination or stop_ids[min(30, len(stop_ids) - 1)]
+    # ── Build system ──
+    console.print("\n[cyan]Loading transit data...[/cyan]")
+    graph, fuser = build_system(args)
 
-    origin = resolve_stop(graph, str(origin_query))
-    dest   = resolve_stop(graph, str(dest_query))
+    stop_ids = list(graph.stops.keys())
+
+    # ── Benchmark ──
+    if args.benchmark:
+        console.print(f"\n[cyan]Benchmark: {args.n_pairs} random connected OD pairs...[/cyan]")
+        pairs = random_connected_pairs(graph, args.n_pairs)
+        if not pairs:
+            console.print("[red]Could not find connected OD pairs.[/red]")
+            return
+        results = run_benchmark(graph, pairs, k=args.top_k, verbose=True)
+        if not args.no_plots:
+            from visualization.plot import plot_method_comparison
+            plot_method_comparison(results)
+        return
+
+    # ── Single query ──
+    o_query = args.origin      or "Majestic"
+    d_query = args.destination or "Whitefield"
+
+    origin = resolve_stop(graph, o_query)
+    dest   = resolve_stop(graph, d_query)
 
     if origin is None:
-        console.print(f"[red]Origin stop '{origin_query}' not found.[/red]")
+        console.print(f"[red]Stop not found: '{o_query}'[/red]")
+        console.print("Tip: use --list-metro to see metro stations, "
+                      "or try partial names like 'MG Road', 'Koramangala'")
         sys.exit(1)
     if dest is None:
-        console.print(f"[red]Destination stop '{dest_query}' not found.[/red]")
+        console.print(f"[red]Stop not found: '{d_query}'[/red]")
         sys.exit(1)
 
-    console.print(f"\n[green]Origin:[/green]      {graph.stop_name(origin)} ({origin})")
-    console.print(f"[green]Destination:[/green] {graph.stop_name(dest)} ({dest})")
-    console.print(f"[green]Top-K:[/green]       {args.top_k}\n")
+    console.print(f"\n  [green]Origin     :[/green] {graph.stop_name(origin)} "
+                  f"[dim]({origin}, {graph.stop_mode(origin)})[/dim]")
+    console.print(f"  [green]Destination:[/green] {graph.stop_name(dest)} "
+                  f"[dim]({dest}, {graph.stop_mode(dest)})[/dim]")
+    console.print(f"  [green]Top-K      :[/green] {args.top_k}\n")
 
     # ── Pareto Dijkstra ──
     console.print("[cyan]Running Multi-criteria Pareto Dijkstra...[/cyan]")
     router = ParetoDijkstra(graph)
     stats  = router.run_with_stats(origin, dest)
-    pareto_paths = stats["paths"]
+    pareto = stats["paths"]
 
-    console.print(
-        f"  Pareto frontier: [bold]{len(pareto_paths)}[/bold] non-dominated paths  "
-        f"[dim](runtime: {stats['runtime_s']:.3f}s)[/dim]"
-    )
-
-    if not pareto_paths:
-        console.print("[red]No paths found between origin and destination.[/red]")
+    if not pareto:
+        console.print("[red]No paths found. Try different stops or --synthetic.[/red]")
         sys.exit(0)
 
-    # ── Top-K Selection ──
-    div_sel    = DiversitySelector(k=args.top_k)
-    clust_sel  = ClusterSelector(k=args.top_k)
-    div_paths  = div_sel.select(pareto_paths)
-    clust_paths= clust_sel.select(pareto_paths)
+    console.print(
+        f"  Pareto frontier: [bold]{len(pareto)}[/bold] non-dominated paths  "
+        f"[dim]({stats['runtime_s']:.3f}s)[/dim]"
+    )
 
-    console.print("\n[bold yellow]── Diversity-Constrained Selection (Jaccard) ──[/bold yellow]")
-    print_route_table(div_paths, title="Top-K: Diversity Selector")
+    # ── Top-K selection ──
+    div_paths   = DiversitySelector(k=args.top_k).select(pareto)
+    clust_paths = ClusterSelector(k=args.top_k).select(pareto)
 
-    console.print("\n[bold green]── Cluster-Based Selection (k-means) ──[/bold green]")
-    print_route_table(clust_paths, title="Top-K: Cluster Selector")
+    console.print("\n[bold yellow]── Diversity-Constrained Top-K (Jaccard) ──[/bold yellow]")
+    print_route_table(div_paths, "Top-K: Diversity Selector")
+    if div_paths:
+        best = min(div_paths, key=lambda p: p.total_weight.time_min)
+        print_route_detail(best, graph, "Fastest route")
+
+    console.print("\n[bold green]── Cluster-Based Top-K (k-means) ──[/bold green]")
+    print_route_table(clust_paths, "Top-K: Cluster Selector")
 
     # ── Baselines ──
-    ws_router  = WeightedSumRouter(graph, weights=tuple(args.weights))
-    lex_router = LexicographicRouter(graph)
-
-    ws_result  = ws_router.run(origin, dest)
-    lex_result = lex_router.run(origin, dest)
+    ws_path  = WeightedSumRouter(graph, tuple(args.weights)).run(origin, dest)
+    lex_path = LexicographicRouter(graph).run(origin, dest)
 
     console.print("\n[bold red]── Baseline: Weighted Sum ──[/bold red]")
-    if ws_result:
-        print_route_table([ws_result], title="Weighted Sum (single route)")
-    else:
-        console.print("  [dim]No route found.[/dim]")
+    print_route_table([ws_path] if ws_path else [], "Weighted Sum")
+    if ws_path:
+        print_route_detail(ws_path, graph, "Weighted sum route")
 
     console.print("\n[bold magenta]── Baseline: Lexicographic ──[/bold magenta]")
-    if lex_result:
-        print_route_table([lex_result], title="Lexicographic (single route)")
-    else:
-        console.print("  [dim]No route found.[/dim]")
+    print_route_table([lex_path] if lex_path else [], "Lexicographic")
 
     # ── Metrics comparison ──
-    console.print("\n[bold]Metric Summary:[/bold]")
+    console.print("\n[bold]Quality Metrics:[/bold]")
     m_table = Table(show_lines=True)
-    m_table.add_column("Method")
-    m_table.add_column("Paths",      justify="right")
-    m_table.add_column("Diversity",  justify="right")
-    m_table.add_column("Hypervolume",justify="right")
-    m_table.add_column("Spread(t)",  justify="right")
+    m_table.add_column("Method",       style="bold")
+    m_table.add_column("Paths",        justify="right")
+    m_table.add_column("Diversity",    justify="right")
+    m_table.add_column("Hypervolume",  justify="right")
+    m_table.add_column("Spread(time)", justify="right")
+    m_table.add_column("Obj Range — Time / Cost / Transfers")
 
     for label, paths in [
         ("Pareto+Diversity", div_paths),
         ("Pareto+Cluster",   clust_paths),
-        ("WeightedSum",      [ws_result] if ws_result else []),
-        ("Lexicographic",    [lex_result] if lex_result else []),
+        ("WeightedSum",      [ws_path]  if ws_path  else []),
+        ("Lexicographic",    [lex_path] if lex_path else []),
     ]:
         m = summarize_paths(paths)
+        obj = m.get("objective_range", {})
         m_table.add_row(
             label,
             str(m["n_paths"]),
             f"{m['diversity_score']:.3f}",
             f"{m['hypervolume']:.2e}",
             f"{m['spread_time']:.3f}",
+            f"{obj.get('Time (min)',0):.1f}min / "
+            f"₹{obj.get('Cost (INR)',0):.1f} / "
+            f"{obj.get('Transfers',0):.1f}",
         )
     console.print(m_table)
 
-    # ── Visualizations ──
+    # ── Plots ──
     if not args.no_plots:
         console.print("\n[cyan]Generating plots → outputs/[/cyan]")
-        plot_pareto_front(pareto_paths, selected=div_paths)
+        from visualization.plot import (
+            plot_pareto_front, plot_parallel_coordinates,
+            plot_radar, plot_routes_on_map,
+        )
+        plot_pareto_front(pareto, selected=div_paths,
+                          title=f"Pareto Front: {graph.stop_name(origin)} → {graph.stop_name(dest)}")
         plot_parallel_coordinates(div_paths,
                                   labels=[f"R{i+1}" for i in range(len(div_paths))])
         plot_radar(div_paths, labels=[f"R{i+1}" for i in range(len(div_paths))])
         plot_routes_on_map(div_paths, graph.stops,
                            labels=[f"R{i+1}" for i in range(len(div_paths))])
+        console.print("  Saved: pareto_front.png, parallel_coords.png, radar.png, route_map.png")
 
     console.print("\n[bold green]Done.[/bold green]")
 

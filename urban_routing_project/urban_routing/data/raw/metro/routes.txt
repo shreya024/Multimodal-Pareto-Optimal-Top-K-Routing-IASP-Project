@@ -1,0 +1,5 @@
+route_id,route_short_name,route_long_name,route_desc,route_type,agency_id
+1,Metro Purple Whitefield,Metro Purple Whitefield to Challaghatta,-1,1,BMRCL
+2,Metro Purple Challaghatta,Metro Purple Challaghatta to Whitefield,-1,1,BMRCL
+3,Metro Green Madavara,Metro Green Madavara to Silk Institute,-1,1,BMRCL
+4,Metro Green Silk Institute,Metro Green Silk Institute to Madavara,-1,1,BMRCL

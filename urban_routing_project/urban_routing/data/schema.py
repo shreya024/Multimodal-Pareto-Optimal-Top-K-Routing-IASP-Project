@@ -11,6 +11,7 @@ class TransportMode(Enum):
     BUS    = "bus"
     METRO  = "metro"
     WALK   = "walk"
+    TRANSFER="transfer"
 
 
 @dataclass(frozen=True)
