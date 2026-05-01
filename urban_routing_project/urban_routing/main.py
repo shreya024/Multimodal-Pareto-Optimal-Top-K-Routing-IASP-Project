@@ -175,15 +175,20 @@ def print_route_table(paths, title: str = "Routes"):
 
 
 def print_route_detail(path, graph: MultimodalGraph, label: str = ""):
-    """Print hop-by-hop itinerary for one path."""
+    """Print hop-by-hop itinerary with cumulative time and cost."""
     if not path or not path.edges:
         return
     console.print(f"\n  [bold]{label} Itinerary:[/bold]")
+    console.print(f"  [dim]{'Stop':40s}  {'Seg time':>9}  {'Seg cost':>9}  {'Total time':>10}  {'Total cost':>10}[/dim]")
     current_mode = None
+    cum_min  = 0.0
+    cum_cost = 0.0
     for edge in path.edges:
-        mode = edge.mode.value
+        mode     = edge.mode.value
         src_name = graph.stop_name(edge.src)
         dst_name = graph.stop_name(edge.dst)
+        cum_min  += edge.weight.time_min
+        cum_cost += edge.weight.cost_inr
         if mode != current_mode:
             mode_tag = {
                 "bus":      "[green]🚌 BUS[/green]",
@@ -191,11 +196,15 @@ def print_route_detail(path, graph: MultimodalGraph, label: str = ""):
                 "walk":     "[yellow]🚶 WALK[/yellow]",
                 "transfer": "[magenta]↔ TRANSFER[/magenta]",
             }.get(mode, mode.upper())
-            console.print(f"     {mode_tag}")
+            console.print(f"  {mode_tag}")
             current_mode = mode
+        leg = f"{src_name} → {dst_name}"
         console.print(
-            f"       {src_name} → {dst_name}  "
-            f"[dim]{edge.weight.time_min:.1f}min  ₹{edge.weight.cost_inr:.0f}[/dim]"
+            f"    [dim]{leg:40s}  "
+            f"{edge.weight.time_min:>6.1f} min  "
+            f"₹{edge.weight.cost_inr:>7.1f}  "
+            f"{cum_min:>7.1f} min  "
+            f"₹{cum_cost:>7.1f}[/dim]"
         )
 
 

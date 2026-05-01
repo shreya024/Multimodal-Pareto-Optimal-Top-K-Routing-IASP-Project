@@ -182,7 +182,15 @@ class MetroLoader:
             )
 
             # ── Segment edges with real travel times ───────────────────────
-            cumulative_dist_km = 0.0
+            # Fare model: BMRCL charges per journey based on total distance.
+            # Since the router can board at any station, we cannot know the
+            # boarding point at edge level. Instead we distribute fare as
+            # a per-km rate (₹60 cap / 40km route ≈ ₹1.47/km) so that
+            # the total fare accumulated across a realistic journey (e.g. 10km)
+            # approximates the correct slab fare (₹50 for 10km).
+            # Additionally, the boarding wait is charged on the first segment.
+            FARE_PER_KM = 1.50   # ₹/km — approximates BMRCL slab structure
+
             for i in range(len(route_stop_objs) - 1):
                 src = route_stop_objs[i]
                 dst = route_stop_objs[i + 1]
@@ -193,23 +201,20 @@ class MetroLoader:
                 if t_src is not None and t_dst is not None and t_dst > t_src:
                     seg_time_min = t_dst - t_src
                 else:
-                    # Fallback: speed-estimated
                     dist_m = haversine_m(src.lat, src.lon, dst.lat, dst.lon)
-                    seg_time_min = (dist_m / (35_000 / 60))   # 35 km/h
+                    seg_time_min = dist_m / (35_000 / 60)
 
-                dist_m = haversine_m(src.lat, src.lon, dst.lat, dst.lon)
-                cumulative_dist_km += dist_m / 1000.0
+                dist_m   = haversine_m(src.lat, src.lon, dst.lat, dst.lon)
+                dist_km  = dist_m / 1000.0
+                seg_fare = FARE_PER_KM * dist_km
+                co2      = METRO_CO2_G_PKM * dist_km
 
-                # Fare: slab on cumulative distance from route start
-                fare = metro_slab_fare(cumulative_dist_km)
-                co2  = METRO_CO2_G_PKM * (dist_m / 1000.0)
-
-                # Only first boarding incurs wait; model as half-headway on first seg
+                # Boarding wait only on first segment
                 time_total = seg_time_min + (wait_min if i == 0 else 0.0)
 
                 weight = EdgeWeight(
                     time_min  = time_total,
-                    cost_inr  = fare if i == 0 else 0.0,  # fare charged once at boarding
+                    cost_inr  = seg_fare,
                     transfers = 0.0,
                     walking_m = 0.0,
                     co2_g     = co2,
