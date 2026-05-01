@@ -1,0 +1,286 @@
+# Multimodal Pareto-Optimal Routing with Cost
+
+## Extended Project Specification (Synthetic Network)
+
+---
+
+## 1. Objective
+
+Extend the multimodal routing system to include **monetary cost** as an additional optimization criterion.
+
+The system must compute a **bounded, diverse set of Pareto-optimal paths** considering:
+
+[
+C(p) = (t(p), w(p), tr(p), c(p))
+]
+
+Where:
+
+* ( t(p) ): total travel time
+* ( w(p) ): total walking distance
+* ( tr(p) ): number of transfers
+* ( c(p) ): total monetary cost
+
+---
+
+## 2. Key Design Principle
+
+Cost must be **mode-dependent and realistic**, not arbitrary.
+
+Each transport mode has a **different cost structure**:
+
+* Road → fuel + congestion + time
+* Metro → fare based on distance or zones
+* Walking → zero cost
+
+---
+
+## 3. Synthetic Cost Modeling
+
+### 3.1 Road (Car) Cost Model
+
+Cost depends on:
+
+* Distance traveled
+* Fuel efficiency (mileage)
+* Fuel price
+* Congestion
+* Optional time cost
+
+---
+
+### Formulation
+
+[
+c_{\text{road}} =
+\underbrace{\frac{d}{\text{mileage}} \times \text{fuel_price}}_{\text{fuel cost}}
+
+* \underbrace{\gamma \cdot t}_{\text{time value}}
+* \underbrace{\delta \cdot \text{congestion factor}}_{\text{delay penalty}}
+  ]
+
+---
+
+### Parameters (example)
+
+* Mileage: 15 km/l
+* Fuel price: ₹100/l
+* Time value: ₹2 per minute
+* Congestion factor: random multiplier (1–1.5)
+* ( \gamma, \delta ): tunable weights
+
+---
+
+### Interpretation
+
+* Longer distance → more fuel cost
+* Congestion → increases cost indirectly
+* Time spent → adds economic penalty
+
+---
+
+## 3.2 Metro Cost Model
+
+Cost depends on:
+
+* Distance traveled OR
+* Number of stations OR
+* Fare slabs
+
+---
+
+### Simple Model
+
+[
+c_{\text{metro}} = \alpha + \beta \cdot d
+]
+
+Where:
+
+* ( \alpha ): base fare (e.g., ₹10)
+* ( \beta ): per km rate (e.g., ₹2/km)
+
+---
+
+### Alternative (Step Fare Model)
+
+* 0–5 km → ₹10
+* 5–10 km → ₹20
+* > 10 km → ₹30
+
+---
+
+### Important
+
+* Metro is:
+
+  * **fast**
+  * **moderate cost**
+  * **low walking (after access)**
+
+---
+
+## 3.3 Walking Cost Model
+
+[
+c_{\text{walk}} = 0
+]
+
+Optional extension:
+
+* Add discomfort penalty if needed
+
+---
+
+## 4. Updated Edge Attributes
+
+Each edge must now include:
+
+* time
+* walking distance
+* mode
+* route_id
+* **cost**
+
+---
+
+## 5. Updated Objective
+
+Each path accumulates:
+
+[
+(t, w, tr, c)
+]
+
+The routing algorithm must:
+
+* Maintain **4D cost vectors**
+* Apply **Pareto dominance in 4 dimensions**
+
+---
+
+## 6. Dominance Rule (Updated)
+
+A path ( p ) dominates ( q ) if:
+
+[
+\forall i,; C_i(p) \le C_i(q)
+\quad \text{and} \quad
+\exists j:; C_j(p) < C_j(q)
+]
+
+Now across:
+
+* time
+* walking
+* transfers
+* cost
+
+---
+
+## 7. Feasibility Bounds (Updated)
+
+Compute single-objective optima:
+
+* ( t^* ), ( w^* ), ( tr^* ), ( c^* )
+
+Apply bounds:
+
+[
+t \le \alpha_t t^*
+]
+[
+w \le \alpha_w w^*
+]
+[
+tr \le \alpha_{tr}
+]
+[
+c \le \alpha_c c^*
+]
+
+Example:
+
+* ( \alpha_t = 1.5 )
+* ( \alpha_w = 2.0 )
+* ( \alpha_{tr} = 3 )
+* ( \alpha_c = 2.0 )
+
+---
+
+## 8. Trade-offs Introduced
+
+Adding cost introduces **new meaningful conflicts**:
+
+| Path Type    | Time   | Cost   | Walking | Transfers |
+| ------------ | ------ | ------ | ------- | --------- |
+| Car only     | medium | high   | low     | low       |
+| Metro + walk | low    | medium | medium  | medium    |
+| Walk-heavy   | high   | zero   | high    | low       |
+
+This ensures a **rich Pareto frontier**.
+
+---
+
+## 9. Diversity Selection (Updated)
+
+Distance function now includes cost:
+
+[
+d(p_1, p_2) =
+|t_1 - t_2| +
+|w_1 - w_2| +
+|tr_1 - tr_2| +
+|c_1 - c_2|
+]
+
+This ensures selected paths differ in **economic as well as physical aspects**.
+
+---
+
+## 10. Execution Pipeline (Updated)
+
+1. Generate synthetic multimodal graph
+2. Assign edge attributes (time, distance, cost)
+3. Compute single-objective optima (t, w, tr, c)
+4. Run multi-objective label-setting
+5. Apply dominance + feasibility bounds
+6. Collect Pareto paths
+7. Apply diversity-based Top-K selection
+8. Output results
+
+---
+
+## 11. Expected Outcomes
+
+The system should produce:
+
+* Low-cost but slow paths
+* Fast but expensive paths
+* Balanced trade-off solutions
+
+---
+
+## 12. Future Extensions
+
+* Add toll roads
+* Dynamic pricing (peak hours)
+* Real fare rules (GTFS-based)
+* Value-of-time personalization
+
+---
+
+## 13. Summary
+
+This extension incorporates **economic realism** into multimodal routing by introducing a cost dimension.
+
+The system now captures trade-offs across:
+
+* Time
+* Effort (walking)
+* Convenience (transfers)
+* Money
+
+This significantly enhances both the **practical relevance** and the **analytical richness** of the Pareto routing framework.
+
+---

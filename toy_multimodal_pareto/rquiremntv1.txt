@@ -1,0 +1,297 @@
+# Multimodal Pareto-Optimal Routing on Synthetic Network
+
+## Project Specification and Implementation Plan
+
+---
+
+## 1. Objective
+
+The goal of this project is to design and implement a **multimodal routing system** that computes a **bounded set of Pareto-optimal paths** between a given source and destination.
+
+The system must:
+
+* Operate on a **synthetic multimodal graph**
+* Optimize across **multiple criteria simultaneously**
+* Avoid scalarization (no weighted sum)
+* Output a **diverse Top-K subset** of meaningful Pareto paths
+
+---
+
+## 2. Problem Definition
+
+### Input
+
+* Directed graph ( G = (V, E) )
+* Source node ( s \in V )
+* Destination node ( t \in V )
+
+Each edge has attributes:
+
+* Travel time ( t_e )
+* Walking distance ( w_e )
+* Mode ( m_e \in {\text{road}, \text{metro}, \text{walk}} )
+* Route ID (for transfer tracking)
+
+---
+
+### Output
+
+A set of paths ( P_{s,t} ), where each path ( p ) has:
+
+[
+C(p) = (t(p), w(p), tr(p))
+]
+
+Where:
+
+* ( t(p) ): total travel time
+* ( w(p) ): total walking distance
+* ( tr(p) ): number of transfers
+
+The output must:
+
+* Contain **non-dominated paths**
+* Be limited to **Top-K diverse solutions**
+
+---
+
+## 3. Synthetic Data Design
+
+### 3.1 Network Structure
+
+Construct a **structured synthetic city network** with three layers:
+
+#### 1. Road Layer
+
+* Grid-based graph (e.g., 5×5 or 6×6)
+* Bidirectional edges
+* Moderate speeds with random variation
+* Optional congestion factor
+
+#### 2. Transit Layer (Metro)
+
+* One or more linear routes across the grid
+* Faster travel times than road
+* Sparse connectivity
+
+#### 3. Walking Layer
+
+* Connect nodes within a spatial radius
+* Low speed (e.g., 5 km/h)
+* Enables transfers and shortcuts
+
+---
+
+### 3.2 Design Goals
+
+The synthetic network must create **meaningful trade-offs**:
+
+* Fast routes with more transfers
+* Slow routes with less walking
+* Balanced routes
+
+This ensures a **non-trivial Pareto frontier**.
+
+---
+
+## 4. Core Algorithm
+
+### 4.1 Multi-Objective Label-Setting
+
+Extend Dijkstra’s algorithm to maintain **multiple labels per node**.
+
+Each label stores:
+
+* Current node
+* Cost vector ( (t, w, tr) )
+* Previous label (for path reconstruction)
+* Previous mode
+* Route ID
+
+---
+
+### 4.2 Label Expansion
+
+For each label:
+
+1. Traverse outgoing edges
+2. Compute new costs:
+
+   * Add travel time
+   * Add walking distance
+   * Update transfer count:
+
+     * Increment if mode or route changes
+
+---
+
+### 4.3 Dominance Rule
+
+A label ( L_1 ) dominates ( L_2 ) if:
+
+[
+\forall i,; C_i(L_1) \le C_i(L_2)
+\quad \text{and} \quad
+\exists j:; C_j(L_1) < C_j(L_2)
+]
+
+Dominated labels must be discarded.
+
+---
+
+## 5. Pruning Strategy
+
+### 5.1 Feasibility Bounds (Critical)
+
+To avoid combinatorial explosion, restrict the search space.
+
+#### Step 1: Compute single-objective optima
+
+* ( t^* ): minimum time path
+* ( w^* ): minimum walking path
+* ( tr^* ): minimum transfers
+
+#### Step 2: Define bounds
+
+[
+t(p) \le \alpha_t \cdot t^*
+]
+[
+w(p) \le \alpha_w \cdot w^*
+]
+[
+tr(p) \le \alpha_{tr}
+]
+
+Example:
+
+* ( \alpha_t = 1.5 )
+* ( \alpha_w = 2.0 )
+* ( \alpha_{tr} = 3 )
+
+---
+
+### 5.2 Purpose
+
+* Eliminates unrealistic paths
+* Controls label growth
+* Focuses on meaningful solutions
+
+---
+
+## 6. Path Reconstruction
+
+Each label stores a pointer to its predecessor.
+
+To reconstruct a path:
+
+* Start from destination label
+* Backtrack to source
+* Reverse the sequence
+
+Also store:
+
+* Node sequence
+* Mode sequence
+
+---
+
+## 7. Top-K Diverse Path Selection
+
+Instead of returning all Pareto paths, select a **representative subset**.
+
+---
+
+### 7.1 Step 1: Anchor Paths
+
+Include:
+
+* Time-optimal path
+* Walking-optimal path
+* Transfer-optimal path
+
+---
+
+### 7.2 Step 2: Diversity Metric
+
+Define distance between two paths:
+
+[
+d(p_1, p_2) =
+|t_1 - t_2| +
+|w_1 - w_2| +
+|tr_1 - tr_2|
+]
+
+(Optional: normalize by optimal values)
+
+---
+
+### 7.3 Step 3: Greedy Selection
+
+Iteratively select paths:
+
+[
+p = \arg\max_{candidate} \min_{q \in S} d(p, q)
+]
+
+Until:
+
+[
+|S| = K
+]
+
+---
+
+### 7.4 Outcome
+
+* Covers entire Pareto front
+* Avoids redundant solutions
+* Produces interpretable results
+
+---
+
+## 8. Execution Pipeline
+
+1. Generate synthetic graph
+2. Compute single-objective optima
+3. Run multi-objective label-setting
+4. Apply dominance + bounds
+5. Collect Pareto labels at destination
+6. Reconstruct paths
+7. Apply diversity-based Top-K selection
+8. Output results
+
+---
+
+## 9. Evaluation Criteria
+
+* Correctness (no dominated paths)
+* Diversity of solutions
+* Computational efficiency
+* Stability under parameter changes
+
+---
+
+## 10. Future Extensions
+
+* Add real GTFS data
+* Introduce waiting time modeling
+* Use real congestion functions
+* Replace synthetic graph with real road network
+* Experiment with ε-dominance
+
+---
+
+## 11. Summary
+
+This project implements a **deterministic multimodal routing system** that:
+
+* Preserves multi-objective trade-offs
+* Avoids scalar cost reduction
+* Uses structured pruning and diversity selection
+* Produces a compact and meaningful set of routes
+
+The system is first validated on **synthetic data**, enabling full control and interpretability, before scaling to real-world datasets.
+
+---
