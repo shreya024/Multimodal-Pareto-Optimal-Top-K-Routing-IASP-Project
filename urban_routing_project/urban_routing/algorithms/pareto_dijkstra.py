@@ -18,13 +18,13 @@ at each node rather than a single scalar distance.
          If accepted (non-dominated and frontier not full) → push to heap.
 
   Termination:
-    When heap is empty OR destination's frontier has been populated
-    and the popped label's priority exceeds the best time in frontier[dst].
+    When the heap is empty. With max_labels=None, this is an exact
+    label-setting search over the constructed graph.
 
 Complexity
 ----------
   O(|E| · |F|_max · log(|open|))
-  where |F|_max is the maximum frontier size per node (capped at MAX_LABELS_PER_NODE).
+  where |F|_max is the maximum frontier size per node.
 
 Returns
 -------
@@ -33,7 +33,7 @@ Returns
 from __future__ import annotations
 
 import heapq
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from core.graph import MultimodalGraph
 from core.label import Label, LabelFrontier
@@ -50,7 +50,7 @@ class ParetoDijkstra:
         self,
         origin:      str,
         destination: str,
-        max_labels:  int = cfg.MAX_LABELS_PER_NODE,
+        max_labels:  int | None = cfg.MAX_LABELS_PER_NODE,
     ) -> List[ParetoPath]:
         """
         Compute the Pareto-optimal frontier of paths from origin to destination.
@@ -58,7 +58,7 @@ class ParetoDijkstra:
         Parameters
         ----------
         origin, destination : stop_id strings
-        max_labels          : per-node frontier cap (overrides config)
+        max_labels          : optional per-node frontier cap; None is exact
 
         Returns
         -------
@@ -70,9 +70,11 @@ class ParetoDijkstra:
         if not self.graph.has_node(destination):
             raise ValueError(f"Destination node '{destination}' not in graph.")
 
+        lower_bounds = self._objective_lower_bounds(destination)
+
         # Per-node Pareto frontier
         frontiers: Dict[str, LabelFrontier] = {
-            nid: LabelFrontier() for nid in self.graph.stops
+            nid: LabelFrontier(max_labels=max_labels) for nid in self.graph.stops
         }
 
         # Initial label at origin
@@ -87,19 +89,22 @@ class ParetoDijkstra:
         while heap:
             _, _, current = heapq.heappop(heap)
 
-            # ── Early termination: if current label's time > best known
-            # time at destination, it cannot produce a dominant path
-            if frontiers[destination]:
-                best_dest_time = min(
-                    lb.cost.time_min for lb in frontiers[destination].labels()
-                )
-                if current.cost.time_min > best_dest_time * 3:
-                    # Allow 3× slack to ensure Pareto coverage on other dims
-                    continue
+            node_frontier = frontiers.get(current.node)
+            if node_frontier and any(lb.dominates(current) for lb in node_frontier.labels()):
+                continue
 
-            # ── Expand neighbours
+            dest_frontier = frontiers[destination]
+            if dest_frontier and self._dominated_by_destination(
+                current.cost.as_tuple(), current.node, dest_frontier, lower_bounds
+            ):
+                continue
+
             for edge in self.graph.neighbors_with_edges(current.node):
                 new_cost  = current.cost + edge.weight
+                if dest_frontier and self._dominated_by_destination(
+                    new_cost.as_tuple(), edge.dst, dest_frontier, lower_bounds
+                ):
+                    continue
                 new_label = Label(
                     cost=new_cost,
                     node=edge.dst,
@@ -109,7 +114,7 @@ class ParetoDijkstra:
 
                 frontier = frontiers.get(edge.dst)
                 if frontier is None:
-                    frontier = LabelFrontier()
+                    frontier = LabelFrontier(max_labels=max_labels)
                     frontiers[edge.dst] = frontier
 
                 if frontier.try_add(new_label):
@@ -131,6 +136,48 @@ class ParetoDijkstra:
             ))
 
         return paths
+
+    def _objective_lower_bounds(self, destination: str) -> Dict[str, Tuple[float, ...]]:
+        """Single-objective reverse Dijkstra lower bounds for each objective."""
+        objective_dists = []
+        for obj_idx in range(cfg.N_OBJECTIVES):
+            dist = {destination: 0.0}
+            heap = [(0.0, destination)]
+            while heap:
+                d, node = heapq.heappop(heap)
+                if d > dist.get(node, float("inf")):
+                    continue
+                for pred, _, _, data in self.graph.G.in_edges(node, keys=True, data=True):
+                    edge = data.get("edge")
+                    if edge is None:
+                        continue
+                    nd = d + edge.weight.as_tuple()[obj_idx]
+                    if nd < dist.get(pred, float("inf")):
+                        dist[pred] = nd
+                        heapq.heappush(heap, (nd, pred))
+            objective_dists.append(dist)
+
+        bounds = {}
+        for node in self.graph.stops:
+            bounds[node] = tuple(
+                objective_dists[obj_idx].get(node, float("inf"))
+                for obj_idx in range(cfg.N_OBJECTIVES)
+            )
+        return bounds
+
+    def _dominated_by_destination(
+        self,
+        cost_vec: Tuple[float, ...],
+        node: str,
+        dest_frontier: LabelFrontier,
+        lower_bounds: Dict[str, Tuple[float, ...]],
+    ) -> bool:
+        lb_vec = lower_bounds.get(node)
+        if lb_vec is None or any(v == float("inf") for v in lb_vec):
+            return False
+        optimistic = tuple(cost_vec[i] + lb_vec[i] for i in range(cfg.N_OBJECTIVES))
+        optimistic_label = Label(cost=EdgeWeight(*optimistic), node=node)
+        return any(dest_label.dominates(optimistic_label) for dest_label in dest_frontier.labels())
 
     def run_with_stats(
         self,

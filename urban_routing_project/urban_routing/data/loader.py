@@ -77,6 +77,20 @@ def _find_col(df: pd.DataFrame, *candidates) -> Optional[str]:
     return None
 
 
+def _norm_name(name: str) -> str:
+    return " ".join(str(name).strip().lower().replace("-", " ").split())
+
+
+def _split_terminal_pair(route_name: str) -> Optional[Tuple[str, str]]:
+    text = str(route_name).replace("–", "-").replace("—", "-").strip()
+    if " - " not in text:
+        return None
+    left, right = [part.strip() for part in text.split(" - ", 1)]
+    if not left or not right:
+        return None
+    return left, right
+
+
 # ─── Loader ───────────────────────────────────────────────────────────────────
 
 class BMTCLoader:
@@ -85,6 +99,7 @@ class BMTCLoader:
         self.raw_dir = raw_dir
         self.stops:  Dict[str, Stop]  = {}
         self.routes: Dict[str, Route] = {}
+        self._coord_by_name: Dict[str, Tuple[float, float]] = {}
         self._loaded = False
 
     def load(self) -> "BMTCLoader":
@@ -124,6 +139,7 @@ class BMTCLoader:
                 if self.stops and self.routes:
                     print(f"[loader] GTFS OK: {len(self.stops)} stops, {len(self.routes)} routes")
                     return
+                self.stops = {}
             except Exception as e:
                 print(f"[loader] GTFS attempt failed: {e}")
                 self.stops = {}; self.routes = {}
@@ -153,22 +169,29 @@ class BMTCLoader:
 
     def _load_layout_a(self, df: pd.DataFrame):
         route_col = _find_col(df, "route_no", "route_id", "routeno", "route_number", "route")
-        name_col  = _find_col(df, "route_name", "routename", "name")
+        name_col  = _find_col(df, "route_name", "route_long_name", "routename", "name")
         from_col  = _find_col(df, "from_stop", "from", "origin", "source",
                                "start", "from_station", "fromstop", "from_stop_name")
         to_col    = _find_col(df, "to_stop", "to", "destination", "dest",
                                "end", "to_station", "tostop", "to_stop_name")
         stops_col = _find_col(df, "stops", "stop_list", "all_stops", "halt")
 
-        if from_col is None or to_col is None:
+        if (from_col is None or to_col is None) and name_col is None:
             raise ValueError(f"No From/To columns. Available: {list(df.columns)}")
 
         seen: Dict[str, Route] = {}
         for idx, row in df.iterrows():
             rid       = str(row[route_col]).strip() if route_col else f"R{idx}"
             rname     = str(row[name_col]).strip()  if name_col  else rid
-            from_name = str(row[from_col]).strip()
-            to_name   = str(row[to_col]).strip()
+            from_name = str(row[from_col]).strip() if from_col else ""
+            to_name   = str(row[to_col]).strip() if to_col else ""
+
+            from_route_name = False
+            if (not from_name or from_name == "nan" or not to_name or to_name == "nan") and name_col:
+                pair = _split_terminal_pair(rname)
+                if pair:
+                    from_name, to_name = pair
+                    from_route_name = True
 
             if from_name in ("nan", "") or to_name in ("nan", ""):
                 continue
@@ -180,7 +203,13 @@ class BMTCLoader:
             if not stop_names:
                 stop_names = [from_name, to_name]
 
-            route_stops = [self._get_or_create_stop(n) for n in stop_names]
+            route_stops = [
+                stop for stop in (
+                    self._get_or_create_stop(n, allow_infer=not from_route_name)
+                    for n in stop_names
+                )
+                if stop is not None
+            ]
             if len(route_stops) < 2:
                 continue
             if rid not in seen or len(route_stops) > len(seen[rid].stops):
@@ -240,7 +269,7 @@ class BMTCLoader:
     # ─── GTFS ─────────────────────────────────────────────────────────────────
 
     def _load_gtfs(self, by_name: Dict[str, Path]):
-        stops_df = _norm_cols(pd.read_csv(by_name["stops.csv"], low_memory=False))
+        stops_df = _norm_cols(pd.read_csv(by_name["stops.csv"], low_memory=False, index_col=False))
         sid_col  = _find_col(stops_df, "stop_id", "id")
         sname_col= _find_col(stops_df, "stop_name", "name")
         slat_col = _find_col(stops_df, "stop_lat", "latitude", "lat")
@@ -258,11 +287,12 @@ class BMTCLoader:
             if lat is None or lon is None:
                 lat, lon = _infer_coords(name)
             self.stops[sid] = Stop(stop_id=sid, name=name, lat=lat, lon=lon)
+            self._coord_by_name[_norm_name(name)] = (lat, lon)
 
         # Build routes from stop_times if present
         if "stop_times.csv" in by_name and "trips.csv" in by_name:
-            st_df = _norm_cols(pd.read_csv(by_name["stop_times.csv"], low_memory=False))
-            tr_df = _norm_cols(pd.read_csv(by_name["trips.csv"],      low_memory=False))
+            st_df = _norm_cols(pd.read_csv(by_name["stop_times.csv"], low_memory=False, index_col=False))
+            tr_df = _norm_cols(pd.read_csv(by_name["trips.csv"],      low_memory=False, index_col=False))
 
             trip_c  = _find_col(tr_df, "trip_id", "trip")
             route_c = _find_col(tr_df, "route_id", "route")
@@ -290,12 +320,38 @@ class BMTCLoader:
 
     # ─── Shared helper ────────────────────────────────────────────────────────
 
-    def _get_or_create_stop(self, name: str) -> Stop:
+    def _get_or_create_stop(self, name: str, allow_infer: bool = True) -> Optional[Stop]:
         sid = _stable_id(name)
         if sid not in self.stops:
-            lat, lon = _infer_coords(name)
+            coords = self._lookup_stop_coords(name)
+            if coords is None:
+                if not allow_infer:
+                    return None
+                coords = _infer_coords(name)
+            lat, lon = coords
             self.stops[sid] = Stop(stop_id=sid, name=name, lat=lat, lon=lon)
+            self._coord_by_name[_norm_name(name)] = (lat, lon)
         return self.stops[sid]
+
+    def _lookup_stop_coords(self, name: str) -> Optional[Tuple[float, float]]:
+        target = _norm_name(name)
+        for stop in self.stops.values():
+            if _norm_name(stop.name) == target:
+                return stop.lat, stop.lon
+
+        if target in self._coord_by_name:
+            return self._coord_by_name[target]
+
+        for stop in self.stops.values():
+            sname = _norm_name(stop.name)
+            if target in sname or sname in target:
+                return stop.lat, stop.lon
+
+        for sname, coords in self._coord_by_name.items():
+            if target in sname or sname in target:
+                return coords
+
+        return None
 
     # ─── Synthetic fallback ───────────────────────────────────────────────────
 

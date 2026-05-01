@@ -85,7 +85,7 @@ class MultimodalFuser:
         metro_routes = self.metro_loader.routes
 
         self.all_stops.update(metro_stops)
-        self.all_routes.update(metro_routes)
+        self.all_routes.update({f"metro:{rid}": route for rid, route in metro_routes.items()})
 
         # Metro segment edges and Majestic interchange
         self.extra_edges.extend(self.metro_loader.segment_edges)
@@ -95,7 +95,7 @@ class MultimodalFuser:
 
         # 3. Bus ↔ Metro transfer edges
         n_xfer = self._build_bus_metro_transfers(bus_stops, metro_stops)
-        print(f"[fuser] Bus↔Metro transfer edges : {n_xfer}")
+        print(f"[fuser] Bus<->Metro transfer edges : {n_xfer}")
 
         # 4. Optional OSM walk layer
         if self.use_osm:

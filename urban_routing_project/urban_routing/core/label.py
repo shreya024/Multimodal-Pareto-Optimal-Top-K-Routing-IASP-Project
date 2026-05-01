@@ -86,11 +86,13 @@ class LabelFrontier:
     """
     Maintains the Pareto frontier of labels at a single node.
     Only non-dominated labels are retained.
-    Capped at MAX_LABELS_PER_NODE to prevent combinatorial explosion.
+    Optionally capped to prevent combinatorial explosion. A cap of None keeps
+    the frontier exact.
     """
 
-    def __init__(self):
+    def __init__(self, max_labels=None):
         self._labels: List[Label] = []
+        self.max_labels = max_labels
 
     def try_add(self, new_label: Label) -> bool:
         """
@@ -101,14 +103,16 @@ class LabelFrontier:
         """
         # Check if new_label is dominated by any existing label
         for existing in self._labels:
+            if existing.cost.as_tuple() == new_label.cost.as_tuple():
+                return False
             if existing.dominates(new_label):
                 return False  # new_label is dominated; discard
 
         # Remove labels dominated by new_label
         self._labels = [lb for lb in self._labels if not new_label.dominates(lb)]
 
-        # Hard cap
-        if len(self._labels) >= cfg.MAX_LABELS_PER_NODE:
+        # Optional cap for bounded/approximate runs.
+        if self.max_labels is not None and len(self._labels) >= self.max_labels:
             return False
 
         self._labels.append(new_label)

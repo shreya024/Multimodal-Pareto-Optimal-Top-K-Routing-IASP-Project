@@ -123,7 +123,10 @@ class MultimodalGraph:
         stop_routes = self._build_stop_route_index()
         n_walk = 0
 
+        candidate_pairs = set()
+
         for i, src in enumerate(stop_list):
+            candidates = []
             for j in range(i + 1, n):
                 dst = stop_list[j]
                 if dst.lat - src.lat > lat_thresh:
@@ -131,6 +134,15 @@ class MultimodalGraph:
                 dist = haversine_m(src.lat, src.lon, dst.lat, dst.lon)
                 if dist > cfg.MAX_WALK_TRANSFER_M:
                     continue
+                if src.mode == dst.mode:
+                    continue
+                candidates.append((dist, dst))
+
+            for dist, dst in sorted(candidates, key=lambda item: item[0])[:cfg.MAX_WALK_NEIGHBORS]:
+                pair = tuple(sorted((src.stop_id, dst.stop_id)))
+                if pair in candidate_pairs:
+                    continue
+                candidate_pairs.add(pair)
 
                 walk_w = walk_edge_weight(dist)
 

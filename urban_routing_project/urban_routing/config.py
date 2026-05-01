@@ -37,11 +37,12 @@ CO2_WALK_G_PKM   = 0.0
 
 # Maximum walking edge distance
 MAX_WALK_TRANSFER_M = 600          # metres between stops for a walk link
+MAX_WALK_NEIGHBORS  = 2            # nearest walk links retained per stop
 
 
 # ── Algorithm ──────────────────────────────────────────────────────────────────
 PARETO_HEAP_TIE_BREAKER = OBJ_TIME   # primary sort key in priority queue
-MAX_LABELS_PER_NODE     = 500        # hard cap to prevent label explosion
+MAX_LABELS_PER_NODE     = None       # None = exact frontier; set an int for bounded runs
 
 
 # ── Top-K selection ────────────────────────────────────────────────────────────

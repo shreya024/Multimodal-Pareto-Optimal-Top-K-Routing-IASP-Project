@@ -200,8 +200,8 @@ class MetroLoader:
                 dist_m = haversine_m(src.lat, src.lon, dst.lat, dst.lon)
                 cumulative_dist_km += dist_m / 1000.0
 
-                # Fare: slab on cumulative distance from route start
-                fare = metro_slab_fare(cumulative_dist_km)
+                # Segment-proportional fare keeps mid-line boardings from becoming free.
+                fare = 2.5 * (dist_m / 1000.0)
                 co2  = METRO_CO2_G_PKM * (dist_m / 1000.0)
 
                 # Only first boarding incurs wait; model as half-headway on first seg
@@ -209,7 +209,7 @@ class MetroLoader:
 
                 weight = EdgeWeight(
                     time_min  = time_total,
-                    cost_inr  = fare if i == 0 else 0.0,  # fare charged once at boarding
+                    cost_inr  = fare,
                     transfers = 0.0,
                     walking_m = 0.0,
                     co2_g     = co2,

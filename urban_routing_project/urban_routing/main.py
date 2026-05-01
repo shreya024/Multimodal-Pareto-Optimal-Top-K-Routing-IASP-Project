@@ -28,6 +28,10 @@ import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from rich.console import Console
@@ -95,14 +99,16 @@ def build_system(args) -> Tuple[MultimodalGraph, MultimodalFuser]:
         fuser.metro_loader = MetroLoader()
         fuser.metro_loader.load()
         fuser.all_stops.update(fuser.metro_loader.stops)
-        fuser.all_routes.update(fuser.metro_loader.routes)
+        fuser.all_routes.update({
+            f"metro:{rid}": route for rid, route in fuser.metro_loader.routes.items()
+        })
         fuser.extra_edges.extend(fuser.metro_loader.segment_edges)
         fuser.extra_edges.extend(fuser.metro_loader.interchange_edges)
         print(f"[fuser] Metro : {len(fuser.metro_loader.stops):4d} stations, "
               f"{len(fuser.metro_loader.routes):3d} lines")
 
         n = fuser._build_bus_metro_transfers(bus_stops, fuser.metro_loader.stops)
-        print(f"[fuser] Bus↔Metro transfer edges : {n}")
+        print(f"[fuser] Bus<->Metro transfer edges : {n}")
     else:
         fuser.load()
 
